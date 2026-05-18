@@ -27,9 +27,20 @@ const plansRoutes = require('./src/routes/plans');
 
 const app = express();
 const server = http.createServer(app);
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  'https://tutorbazaar.com',
+  'https://www.tutorbazaar.com',
+  'http://localhost:3000',
+  'http://localhost:5173',
+].filter(Boolean);
+const corsOrigin = (origin, callback) => {
+  if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+  return callback(new Error(`Not allowed by CORS: ${origin}`));
+};
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
   },
 });
@@ -40,7 +51,7 @@ app.use(helmet({
 }));
 
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  origin: corsOrigin,
   credentials: true,
 }));
 
