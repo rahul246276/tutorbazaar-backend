@@ -27,6 +27,98 @@ const normalizeSubjects = (subjects, fallback = 'General Tutoring') => {
   return Array.from(new Set(normalized.length ? normalized : [fallback]));
 };
 
+const hasAllSubjects = (subjects = []) =>
+  subjects.some((subject) => String(subject || '').trim().toLowerCase() === 'all subjects');
+
+const getTutorSubjectNames = (tutor) =>
+  (tutor.subjects || [])
+    .map((subject) => (typeof subject === 'string' ? subject : subject?.name))
+    .map((subject) => String(subject || '').trim())
+    .filter(Boolean);
+
+const getTutorTeachingModes = (tutor) => {
+  const modes = Array.isArray(tutor.teachingModes) ? tutor.teachingModes : [];
+  const normalized = modes.map((mode) => String(mode || '').toLowerCase());
+  if (normalized.includes('both') || normalized.length === 0) return ['online', 'offline'];
+  return normalized.filter((mode) => ['online', 'offline'].includes(mode));
+};
+
+const buildTutorLeadQuery = (tutor, filters = {}) => {
+  const tutorModes = getTutorTeachingModes(tutor);
+  const tutorSubjects = getTutorSubjectNames(tutor);
+  const subjectFilter = String(filters.subject || '').trim();
+  const cityFilter = String(filters.city || '').trim();
+  const modeFilter = String(filters.mode || '').trim().toLowerCase();
+  const city = cityFilter || tutor.city || '';
+
+  const query = { status: 'active' };
+  const and = [];
+
+  const subjectOptions = [];
+  if (subjectFilter) {
+    subjectOptions.push({ 'requirements.subjects': new RegExp(`^${escapeRegex(subjectFilter)}$`, 'i') });
+    if (subjectFilter.toLowerCase() !== 'all subjects') {
+      subjectOptions.push({ 'requirements.subjects': /^All Subjects$/i });
+    }
+  } else if (!hasAllSubjects(tutorSubjects) && tutorSubjects.length > 0) {
+    subjectOptions.push({ 'requirements.subjects': { $in: tutorSubjects } });
+    subjectOptions.push({ 'requirements.subjects': /^All Subjects$/i });
+  }
+  if (subjectOptions.length) and.push({ $or: subjectOptions });
+
+  const modeOptions = [];
+  const requestedModes = modeFilter && modeFilter !== 'both' ? [modeFilter] : tutorModes;
+  if (requestedModes.includes('online')) {
+    modeOptions.push({ 'requirements.mode': { $in: ['online', 'both'] } });
+  }
+  if (requestedModes.includes('offline') && city) {
+    modeOptions.push({
+      'requirements.mode': { $in: ['offline', 'both'] },
+      'requirements.city': new RegExp(`^${escapeRegex(city)}$`, 'i'),
+    });
+  }
+  if (modeOptions.length) and.push({ $or: modeOptions });
+
+  if (and.length) query.$and = and;
+  return query;
+};
+
+const hasTutorViewedLead = (lead, tutorId) =>
+  (lead.viewedBy || []).some((view) => view.tutor?.toString() === tutorId.toString()) ||
+  (lead.lockedBy || []).some((lock) => lock.tutor?.toString() === tutorId.toString());
+
+const sanitizeLeadForTutor = (lead, tutorId, { revealContact = false, premium = false } = {}) => {
+  const viewed = revealContact || hasTutorViewedLead(lead, tutorId);
+  const student = lead.student || {};
+  const studentName = student.name || '';
+  const studentPhone = student.phone || '';
+  const maskedName = studentName.length > 2
+    ? `${studentName.substring(0, 2)}**`
+    : 'Student';
+  const maskedPhone = studentPhone.length >= 4
+    ? `${studentPhone.substring(0, 2)}****${studentPhone.substring(studentPhone.length - 2)}`
+    : 'Click View to see contact details';
+
+  return {
+    ...lead,
+    student: viewed
+      ? student
+      : {
+          id: student.id,
+          name: maskedName,
+          phone: undefined,
+          email: undefined,
+          whatsapp: undefined,
+          contactLocked: true,
+          contactMessage: 'Click View to see contact details',
+          phonePreview: maskedPhone,
+        },
+    isViewedByTutor: viewed,
+    contactLocked: !viewed,
+    hasAdvanceAccess: premium,
+  };
+};
+
 const normalizeBudget = (budget = {}) => {
   if (typeof budget === 'number' || typeof budget === 'string') {
     const amount = Number(budget) || 0;
@@ -54,23 +146,25 @@ const getFullName = (student) =>
   [student?.firstName, student?.lastName].filter(Boolean).join(' ').trim() || student?.email || 'Student';
 
 const normalizeTutorMatch = (tutor, lead) => {
-  const tutorSubjects = (tutor.subjects || []).map((subject) => subject.name?.toLowerCase());
+  const tutorSubjects = getTutorSubjectNames(tutor).map((subject) => subject.toLowerCase());
   const leadSubjects = (lead.requirements.subjects || []).map((subject) => subject.toLowerCase());
-  const sharedSubjects = leadSubjects.filter((subject) => tutorSubjects.includes(subject)).length;
+  const sharedSubjects = hasAllSubjects(leadSubjects) || hasAllSubjects(tutorSubjects)
+    ? Math.max(leadSubjects.length, 1)
+    : leadSubjects.filter((subject) => tutorSubjects.includes(subject)).length;
   const sameCity = tutor.city?.toLowerCase() === lead.requirements.city?.toLowerCase();
+  const modes = getTutorTeachingModes(tutor);
+  const onlineMatch = modes.includes('online') && ['online', 'both'].includes(lead.requirements.mode);
+  const offlineMatch = modes.includes('offline') && ['offline', 'both'].includes(lead.requirements.mode) && sameCity;
   return {
     sameCity,
     sharedSubjects,
-    isMatch: sharedSubjects > 0 && sameCity && tutor.isApproved && tutor.isActive,
+    isMatch: sharedSubjects > 0 && (onlineMatch || offlineMatch) && tutor.isApproved && tutor.isActive,
   };
 };
 
 const notifyMatchingTutors = async (lead) => {
-  const tutors = await Tutor.find({
-    isApproved: true,
-    isActive: true,
-    city: new RegExp(`^${escapeRegex(lead.requirements.city)}$`, 'i'),
-  }).select('email city subjects subscription');
+  const tutors = await Tutor.find({ isApproved: true, isActive: true })
+    .select('email city subjects teachingModes subscription');
 
   const premiumTutors = tutors.filter((tutor) => {
     const match = normalizeTutorMatch(tutor, lead);
@@ -367,26 +461,7 @@ const getAvailableLeadsForTutor = async (tutorId, filters = {}) => {
   const page = Number(filters.page || 1);
   const limit = Number(filters.limit || 10);
 
-  const query = {
-    status: 'active',
-  };
-
-  // Add city filter if available
-  if (filters.city || tutor.city) {
-    query['requirements.city'] = new RegExp(escapeRegex(filters.city || tutor.city), 'i');
-  }
-
-  // Add subjects filter
-  if (filters.subject) {
-    query['requirements.subjects'] = { $in: [filters.subject] };
-  } else if (tutor.subjects?.length > 0) {
-    query['requirements.subjects'] = { $in: tutor.subjects.map((subject) => subject.name) };
-  }
-
-  // Add mode filter
-  if (filters.mode) {
-    query['requirements.mode'] = filters.mode;
-  }
+  const query = buildTutorLeadQuery(tutor, filters);
 
   // Apply advance release filter for Silver/Gold plans
   if (!premium) {
@@ -410,31 +485,10 @@ const getAvailableLeadsForTutor = async (tutorId, filters = {}) => {
     .map((lead) => {
       // Calculate hours ago
       const hoursAgo = Math.floor((new Date() - new Date(lead.createdAt)) / (1000 * 60 * 60));
-      
-      // Create blurred student preview
-      const studentName = lead.student?.name || '';
-      const studentPhone = lead.student?.phone || '';
-      const studentPreview = studentName.length > 2 
-        ? studentName.substring(0, 2) + '** ' + studentName.split(' ').map(part => 
-            part.length > 0 ? part[0] + '*' : ''
-          ).join(' ')
-        : '**';
-      const phonePreview = studentPhone.length >= 4 
-        ? studentPhone.substring(0, 2) + '****' + studentPhone.substring(studentPhone.length - 2)
-        : '****';
 
       return {
-        ...lead,
-        student: {
-          ...lead.student,
-          name: studentPreview,
-          phone: phonePreview,
-          email: undefined,
-        },
-        hasAdvanceAccess: premium,
+        ...sanitizeLeadForTutor(lead, tutorId, { premium }),
         hoursAgo,
-        studentPreview,
-        phonePreview,
       };
     });
 
@@ -466,7 +520,7 @@ const getUnlockedLeadsForTutor = async (tutorId, filters = {}) => {
 
   return {
     leads: leads.map((lead) => ({
-      ...lead,
+      ...sanitizeLeadForTutor(lead, tutorId, { revealContact: true }),
       tutorLock: (lead.lockedBy || []).find((lock) => lock.tutor?.toString() === tutorId.toString()),
     })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) },
@@ -482,29 +536,49 @@ const unlockLeadForTutor = async (tutorId, leadId, io = null) => {
     if (!lead) {
       throw new Error('Lead not found');
     }
-    if (lead.status !== 'active') {
+    const alreadyUnlocked = (lead.lockedBy || []).some((lock) => lock.tutor?.toString() === tutorId.toString());
+    if (lead.status !== 'active' && !alreadyUnlocked) {
       throw new Error(`Lead is ${lead.status}`);
     }
-    if ((lead.lockedBy || []).some((lock) => lock.tutor?.toString() === tutorId.toString())) {
-      throw new Error('Lead already unlocked by this tutor');
+
+    let subscription = await getActiveSubscription(tutorId, session);
+    if (!subscription) {
+      throw new Error('No active subscription');
     }
 
-    const subscription = await useEnquiry(tutorId, lead._id, session);
-    lead.lockedBy.push({
-      tutor: tutorId,
-      unlockedAt: new Date(),
-      expiresAt: lead.expiresAt,
-      enquiriesCost: 1,
-      status: 'new',
-    });
-    lead.lockInfo = {
-      tutor: tutorId,
-      lockedAt: new Date(),
-      expiresAt: lead.expiresAt,
-      creditsDeducted: 1,
-      unlockCount: (lead.lockInfo?.unlockCount || 0) + 1,
-    };
-    lead.status = 'locked';
+    if (!alreadyUnlocked) {
+      subscription = await useEnquiry(tutorId, lead._id, session);
+      lead.lockedBy.push({
+        tutor: tutorId,
+        unlockedAt: new Date(),
+        expiresAt: lead.expiresAt,
+        enquiriesCost: 1,
+        status: 'new',
+      });
+      lead.lockInfo = {
+        tutor: tutorId,
+        lockedAt: new Date(),
+        expiresAt: lead.expiresAt,
+        creditsDeducted: 1,
+        unlockCount: (lead.lockInfo?.unlockCount || 0) + 1,
+      };
+    }
+
+    const alreadyViewed = (lead.viewedBy || []).some((view) => view.tutor?.toString() === tutorId.toString());
+    if (!alreadyViewed) {
+      lead.viewedBy.push({ tutor: tutorId, viewedAt: new Date() });
+      await Tutor.updateOne(
+        { _id: tutorId },
+        {
+          $inc: {
+            'metrics.enquiriesViewed': 1,
+            ...(!alreadyUnlocked ? { 'metrics.unlockedLeads': 1, 'metrics.totalLeads': 1 } : {}),
+          },
+        },
+        { session }
+      );
+    }
+
     await lead.save({ session });
 
     await session.commitTransaction();
@@ -528,7 +602,7 @@ const unlockLeadForTutor = async (tutorId, leadId, io = null) => {
     };
 
     return { 
-      lead, 
+      lead: sanitizeLeadForTutor(lead.toObject(), tutorId, { revealContact: true }), 
       enquiriesRemaining: subscription.remainingEnquiries, 
       student: studentContact,
       unlockedAt: new Date(),
@@ -587,4 +661,5 @@ module.exports = {
   updateTutorLeadStatus,
   addTutorLeadNote,
   getSettings,
+  buildTutorLeadQuery,
 };

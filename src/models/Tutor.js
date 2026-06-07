@@ -108,6 +108,7 @@ const tutorSchema = new mongoose.Schema({
     conversionRate: { type: Number, default: 0 },
     avgResponseTime: { type: Number, default: 0 },
     profileViews: { type: Number, default: 0 },
+    enquiriesViewed: { type: Number, default: 0 },
     rankingScore: { type: Number, default: 0 },
   },
 

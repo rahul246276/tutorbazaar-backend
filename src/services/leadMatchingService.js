@@ -16,6 +16,14 @@ const PLAN_SCORES = {
 };
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const hasAllSubjects = (subjects = []) =>
+  subjects.some((subject) => String(subject || '').trim().toLowerCase() === 'all subjects');
+
+const getTutorModes = (tutor) => {
+  const modes = Array.isArray(tutor.teachingModes) ? tutor.teachingModes.map((mode) => String(mode || '').toLowerCase()) : [];
+  if (modes.includes('both') || modes.length === 0) return ['online', 'offline'];
+  return modes.filter((mode) => ['online', 'offline'].includes(mode));
+};
 
 const findMatchingTutors = async (leadId, options = {}) => {
   try {
@@ -37,14 +45,36 @@ const findMatchingTutors = async (leadId, options = {}) => {
           'subscription.remainingEnquiries': { $gt: 0 },
         };
 
-    // City matching (case-insensitive)
-    if (scope !== 'all' && lead.requirements?.city) {
-      query.city = new RegExp(escapeRegex(lead.requirements.city), 'i');
-    }
-
     // Subject matching
     if (scope !== 'all' && lead.requirements?.subjects && lead.requirements.subjects.length > 0) {
-      query['subjects.name'] = { $in: lead.requirements.subjects };
+      if (!hasAllSubjects(lead.requirements.subjects)) {
+        query.$or = [
+          { 'subjects.name': { $in: lead.requirements.subjects } },
+          { 'subjects.name': /^All Subjects$/i },
+        ];
+      }
+    }
+
+    if (scope !== 'all') {
+      const mode = lead.requirements?.mode || 'both';
+      const cityCondition = lead.requirements?.city
+        ? { city: new RegExp(`^${escapeRegex(lead.requirements.city)}$`, 'i') }
+        : {};
+      if (mode === 'online') {
+        query.teachingModes = { $in: ['online', 'both'] };
+      } else if (mode === 'offline') {
+        Object.assign(query, cityCondition, { teachingModes: { $in: ['offline', 'both'] } });
+      } else if (lead.requirements?.city) {
+        query.$and = [
+          ...(query.$and || []),
+          {
+            $or: [
+              { teachingModes: { $in: ['online', 'both'] } },
+              { ...cityCondition, teachingModes: { $in: ['offline', 'both'] } },
+            ],
+          },
+        ];
+      }
     }
 
     // Plan filter
@@ -66,7 +96,7 @@ const findMatchingTutors = async (leadId, options = {}) => {
 
     // Fetch matching tutors
     const tutors = await Tutor.find(query)
-      .select('firstName lastName email phone city subjects subscription rating isFeatured metrics')
+      .select('firstName lastName email phone city subjects teachingModes subscription rating isFeatured metrics')
       .limit(scope === 'all' ? limit : limit * 2) // Get more to filter and score for smart matching
       .lean();
 
@@ -74,6 +104,14 @@ const findMatchingTutors = async (leadId, options = {}) => {
     const scoredTutors = tutors.map(tutor => {
       let matchScore = 0;
       const matchReasons = [];
+
+      const tutorModes = getTutorModes(tutor);
+      const leadMode = lead.requirements?.mode || 'both';
+      const sameCity = Boolean(lead.requirements?.city &&
+        tutor.city &&
+        tutor.city.toLowerCase() === lead.requirements.city.toLowerCase());
+      const onlineMatch = tutorModes.includes('online') && ['online', 'both'].includes(leadMode);
+      const offlineMatch = tutorModes.includes('offline') && ['offline', 'both'].includes(leadMode) && sameCity;
 
       // City match (+50)
       if (lead.requirements?.city && 
@@ -87,12 +125,23 @@ const findMatchingTutors = async (leadId, options = {}) => {
       const tutorSubjects = (tutor.subjects || []).map(s => 
         typeof s === 'object' ? s.name : s
       );
-      const matchingSubjects = (lead.requirements?.subjects || []).filter(subject =>
-        tutorSubjects.some(ts => ts.toLowerCase() === subject.toLowerCase())
-      );
+      const leadSubjects = lead.requirements?.subjects || [];
+      const matchingSubjects = hasAllSubjects(leadSubjects) || hasAllSubjects(tutorSubjects)
+        ? leadSubjects
+        : leadSubjects.filter(subject =>
+            tutorSubjects.some(ts => ts.toLowerCase() === subject.toLowerCase())
+          );
       if (matchingSubjects.length > 0) {
         matchScore += 30 * matchingSubjects.length;
         matchReasons.push(`${matchingSubjects.length} Subject Match${matchingSubjects.length > 1 ? 'es' : ''}`);
+      }
+
+      if (onlineMatch) {
+        matchScore += 20;
+        matchReasons.push('Online Match');
+      } else if (offlineMatch) {
+        matchScore += 20;
+        matchReasons.push('Offline City Match');
       }
 
       // Plan score

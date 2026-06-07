@@ -51,6 +51,16 @@ const toCsv = (rows) => {
   return [headers.join(','), ...lines.map((line) => line.map((value) => `"${String(value || '').replace(/"/g, '""')}"`).join(','))].join('\n');
 };
 
+const normalizeSubjects = (subjects = []) =>
+  (Array.isArray(subjects) ? subjects : [subjects])
+    .map((subject) => (typeof subject === 'string' ? { name: subject.trim() } : { ...subject, name: String(subject?.name || '').trim() }))
+    .filter((subject) => subject.name);
+
+const normalizeTeachingModes = (modes = ['both']) => {
+  const normalized = (Array.isArray(modes) ? modes : [modes]).map((mode) => String(mode || '').toLowerCase());
+  return normalized.includes('both') ? ['both'] : normalized.filter((mode) => ['online', 'offline'].includes(mode));
+};
+
 router.get('/tutors/export', async (req, res, next) => {
   try {
     const tutors = await Tutor.find(buildFilter(req.query)).lean();
@@ -176,7 +186,17 @@ router.put('/tutors/:id/featured', async (req, res, next) => {
 
 router.put('/tutors/:id', async (req, res, next) => {
   try {
-    const tutor = await Tutor.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    const updates = { ...req.body };
+    if (updates.subjects) updates.subjects = normalizeSubjects(updates.subjects);
+    if (updates.teachingModes) updates.teachingModes = normalizeTeachingModes(updates.teachingModes);
+    if (updates.classes) {
+      updates.preferences = {
+        ...(updates.preferences || {}),
+        preferredClasses: Array.isArray(updates.classes) ? updates.classes.filter(Boolean) : [updates.classes].filter(Boolean),
+      };
+      delete updates.classes;
+    }
+    const tutor = await Tutor.findByIdAndUpdate(req.params.id, updates, { new: true, runValidators: true });
     if (!tutor) return res.status(404).json({ success: false, message: 'Tutor not found' });
     await logActivity(req, 'edit_tutor', 'tutor', tutor._id, `${tutor.firstName} ${tutor.lastName}`);
     res.json({ success: true, data: tutor });
@@ -298,6 +318,7 @@ router.post('/tutors', async (req, res, next) => {
       bio,
       headline,
       subjects,
+      classes,
       experienceYears,
       experienceDetails,
       teachingModes,
@@ -330,17 +351,20 @@ router.post('/tutors', async (req, res, next) => {
       locality: locality || '',
       bio,
       headline,
-      subjects: subjects || [],
+      subjects: normalizeSubjects(subjects || []),
       experience: {
         years: experienceYears || 0,
         details: experienceDetails || ''
       },
-      teachingModes: teachingModes || ['both'],
+      teachingModes: normalizeTeachingModes(teachingModes || ['both']),
       pricing: {
         hourlyRate: hourlyRate || 0,
         monthlyRate: monthlyRate || 0
       },
       education: education || [],
+      preferences: {
+        preferredClasses: Array.isArray(classes) ? classes.filter(Boolean) : [classes].filter(Boolean),
+      },
       isApproved,
       isActive,
       metrics: {

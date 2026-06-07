@@ -12,6 +12,7 @@ const { createPlanOrder, getCurrentPlan, getPlanHistory, verifyPlanPayment } = r
 const { getActiveSubscription } = require('../services/planService');
 const {
   addTutorLeadNote,
+  buildTutorLeadQuery,
   getAvailableLeadsForTutor,
   getUnlockedLeadsForTutor,
   unlockLeadForTutor,
@@ -23,6 +24,11 @@ const sanitizeTutor = (tutor) => ({
   password: undefined,
   notifications: undefined,
 });
+
+const normalizeSubjects = (subjects = []) =>
+  (Array.isArray(subjects) ? subjects : [subjects])
+    .map((subject) => (typeof subject === 'string' ? { name: subject.trim() } : { ...subject, name: String(subject?.name || '').trim() }))
+    .filter((subject) => subject.name);
 
 // ─── Tutor Dashboard ──────────────────────────────────────────────────────────
 router.get('/dashboard', auth, authorize('tutor'), async (req, res, next) => {
@@ -38,11 +44,9 @@ router.get('/dashboard', auth, authorize('tutor'), async (req, res, next) => {
         .sort({ createdAt: -1 })
         .limit(5)
         .lean(),
-      Lead.countDocuments({
-        status: 'active',
-        ...((req.user.city) ? { 'requirements.city': new RegExp(req.user.city, 'i') } : {}),
-        ...((req.user.subjects?.length > 0) ? { 'requirements.subjects': { $in: req.user.subjects.map((s) => s.name) } } : {}),
-      }),
+      Tutor.findById(req.userId).lean().then((profile) =>
+        profile ? Lead.countDocuments(buildTutorLeadQuery(profile)) : 0
+      ),
     ]);
 
     const totalReviews = reviews.length;
@@ -59,6 +63,7 @@ router.get('/dashboard', auth, authorize('tutor'), async (req, res, next) => {
           profileViews: tutor.metrics?.profileViews || 0,
           availableMatches,
           enquiriesUnlocked: tutor.metrics?.unlockedLeads || recentLeads.length,
+          enquiriesViewed: tutor.metrics?.enquiriesViewed || 0,
           rating: averageRating,
           totalReviews,
           subscription: tutor.subscription,
@@ -126,14 +131,16 @@ router.get('/profile', auth, authorize('tutor'), async (req, res, next) => {
 router.put('/profile', auth, authorize('tutor'), async (req, res, next) => {
   try {
     const allowed = [
-      'firstName', 'lastName', 'bio', 'headline', 'city', 'locality',
+      'firstName', 'lastName', 'phone', 'email', 'bio', 'headline', 'city', 'locality',
       'subjects', 'teachingModes', 'pricing', 'education', 'experience',
-      'availability', 'documents', 'studentsTaught', 'responseRate',
+      'availability', 'documents', 'studentsTaught', 'responseRate', 'preferences',
     ];
     const updates = {};
     allowed.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
+    if (updates.subjects) updates.subjects = normalizeSubjects(updates.subjects);
+    if (updates.teachingModes?.includes('both')) updates.teachingModes = ['both'];
 
     const tutor = await Tutor.findByIdAndUpdate(req.userId, updates, {
       new: true,

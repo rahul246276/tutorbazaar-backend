@@ -71,6 +71,11 @@ const leadSchema = new mongoose.Schema({
     assignedAt: Date,
   }],
 
+  viewedBy: [{
+    tutor: { type: mongoose.Schema.Types.ObjectId, ref: 'Tutor' },
+    viewedAt: { type: Date, default: Date.now },
+  }],
+
   // Legacy field (keep for backward compatibility)
   lockInfo: {
     tutor: { type: mongoose.Schema.Types.ObjectId, ref: 'Tutor' },
@@ -126,6 +131,7 @@ leadSchema.index({ status: 1, 'lockInfo.expiresAt': 1 });
 leadSchema.index({ advanceReleaseAt: 1, status: 1 });  // NEW: For advance alert cron job
 leadSchema.index({ createdAt: -1 });
 leadSchema.index({ 'lockedBy.tutor': 1, createdAt: -1 });
+leadSchema.index({ 'viewedBy.tutor': 1, createdAt: -1 });
 
 // Pre-save middleware to generate lead ID
 leadSchema.pre('save', async function(next) {
