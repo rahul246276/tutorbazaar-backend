@@ -174,6 +174,8 @@ const findMatchingTutors = async (leadId, options = {}) => {
       // Check if already assigned
       const alreadyAssigned = lead.lockedBy?.some(locked => 
         locked.tutor && locked.tutor.toString() === tutor._id.toString()
+      ) || lead.adminAssigned?.tutorIds?.some(assignedTutorId =>
+        assignedTutorId?.toString() === tutor._id.toString()
       );
 
       return {
@@ -357,8 +359,14 @@ const getPendingDistributionLeads = async (options = {}) => {
     const query = {
       status: 'active',
       $or: [
-        { lockedBy: { $size: 0 } }, // No tutors assigned
-        { lockedBy: { $exists: false } }, // No lockedBy array
+        {
+          lockedBy: { $size: 0 },
+          'adminAssigned.isAssigned': { $ne: true },
+        },
+        {
+          lockedBy: { $exists: false },
+          'adminAssigned.isAssigned': { $ne: true },
+        },
       ],
     };
 
@@ -380,7 +388,7 @@ const getPendingDistributionLeads = async (options = {}) => {
 
     // Get leads
     const leads = await Lead.find(query)
-      .select('requirements status createdAt lockedBy')
+      .select('requirements status createdAt lockedBy adminAssigned')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)

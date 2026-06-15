@@ -83,9 +83,17 @@ const buildTutorLeadQuery = (tutor, filters = {}) => {
   return query;
 };
 
+const isLeadAssignedToTutor = (lead, tutorId) =>
+  (lead.adminAssigned?.tutorIds || []).some((id) => id?.toString() === tutorId.toString()) ||
+  (lead.lockedBy || []).some((lock) =>
+    lock.tutor?.toString() === tutorId.toString() && lock.adminAssigned
+  );
+
 const hasTutorViewedLead = (lead, tutorId) =>
   (lead.viewedBy || []).some((view) => view.tutor?.toString() === tutorId.toString()) ||
-  (lead.lockedBy || []).some((lock) => lock.tutor?.toString() === tutorId.toString());
+  (lead.lockedBy || []).some((lock) =>
+    lock.tutor?.toString() === tutorId.toString() && !lock.adminAssigned
+  );
 
 const sanitizeLeadForTutor = (lead, tutorId, { revealContact = false, premium = false } = {}) => {
   const viewed = revealContact || hasTutorViewedLead(lead, tutorId);
@@ -115,6 +123,7 @@ const sanitizeLeadForTutor = (lead, tutorId, { revealContact = false, premium = 
         },
     isViewedByTutor: viewed,
     contactLocked: !viewed,
+    isAdminAssignedToTutor: isLeadAssignedToTutor(lead, tutorId),
     hasAdvanceAccess: premium,
   };
 };
@@ -338,7 +347,6 @@ const assignLeadToTutors = async (leadId, tutorIds = [], options = {}) => {
   const tutors = await Tutor.find({ _id: { $in: uniqueTutorIds }, isActive: true });
   const distributed = [];
   const errors = [];
-  const expiresAt = lead.expiresAt || new Date(Date.now() + 48 * 60 * 60 * 1000);
 
   for (const tutorId of uniqueTutorIds) {
     const tutor = tutors.find((item) => item._id.toString() === tutorId);
@@ -347,34 +355,13 @@ const assignLeadToTutors = async (leadId, tutorIds = [], options = {}) => {
       continue;
     }
 
-    const alreadyAssigned = (lead.lockedBy || []).some((lock) => lock.tutor?.toString() === tutorId);
+    const alreadyAssigned = isLeadAssignedToTutor(lead, tutorId);
     if (alreadyAssigned) {
       errors.push(`Lead already assigned to ${tutor.firstName} ${tutor.lastName}`);
       continue;
     }
 
-    lead.lockedBy.push({
-      tutor: tutor._id,
-      unlockedAt: new Date(),
-      expiresAt,
-      enquiriesCost: 0,
-      adminAssigned: true,
-      assignedAt: new Date(),
-      status: 'new',
-    });
-
-    if (!lead.lockInfo?.tutor) {
-      lead.lockInfo = {
-        tutor: tutor._id,
-        lockedAt: new Date(),
-        expiresAt,
-        creditsDeducted: 0,
-        unlockCount: lead.lockInfo?.unlockCount || 0,
-      };
-    }
-
     tutor.metrics = tutor.metrics || {};
-    tutor.metrics.unlockedLeads = (tutor.metrics.unlockedLeads || 0) + 1;
     tutor.metrics.totalLeads = (tutor.metrics.totalLeads || 0) + 1;
     await tutor.save({ validateBeforeSave: false });
 
@@ -392,7 +379,6 @@ const assignLeadToTutors = async (leadId, tutorIds = [], options = {}) => {
       ...distributed.map((item) => String(item.tutorId)),
     ]));
 
-    lead.status = 'locked';
     lead.adminAssigned = {
       isAssigned: true,
       tutorIds: assignedIds.map((id) => new mongoose.Types.ObjectId(id)),
@@ -420,8 +406,7 @@ const assignLeadToTutors = async (leadId, tutorIds = [], options = {}) => {
     if (io) {
       distributed.forEach((item) => {
         io.to(`tutor_${item.tutorId}`).emit('lead_assigned', {
-          lead,
-          studentDetails: lead.student,
+          lead: sanitizeLeadForTutor(lead.toObject(), item.tutorId),
           message: message || 'Admin has assigned you a new student lead',
         });
       });
@@ -461,15 +446,33 @@ const getAvailableLeadsForTutor = async (tutorId, filters = {}) => {
   const page = Number(filters.page || 1);
   const limit = Number(filters.limit || 10);
 
-  const query = buildTutorLeadQuery(tutor, filters);
+  const marketplaceQuery = buildTutorLeadQuery(tutor, filters);
+  marketplaceQuery['lockedBy.tutor'] = { $ne: tutorId };
 
   // Apply advance release filter for Silver/Gold plans
   if (!premium) {
-    query.$or = [
-      { advanceReleaseAt: { $exists: false } },
-      { advanceReleaseAt: { $lte: new Date() } },
+    marketplaceQuery.$and = [
+      ...(marketplaceQuery.$and || []),
+      {
+        $or: [
+          { advanceReleaseAt: { $exists: false } },
+          { advanceReleaseAt: { $lte: new Date() } },
+        ],
+      },
     ];
   }
+
+  // Admin-pushed leads stay available with hidden contact details until viewed.
+  // The legacy lockedBy condition also restores already-assigned, unviewed leads.
+  const assignedUnviewedQuery = {
+    status: { $in: ['active', 'locked'] },
+    'viewedBy.tutor': { $ne: tutorId },
+    $or: [
+      { 'adminAssigned.tutorIds': tutorId },
+      { lockedBy: { $elemMatch: { tutor: tutorId, adminAssigned: true } } },
+    ],
+  };
+  const query = { $or: [marketplaceQuery, assignedUnviewedQuery] };
 
   const [leads, total] = await Promise.all([
     Lead.find(query)
@@ -481,7 +484,6 @@ const getAvailableLeadsForTutor = async (tutorId, filters = {}) => {
   ]);
 
   const filtered = leads
-    .filter((lead) => !(lead.lockedBy || []).some((lock) => lock.tutor?.toString() === tutorId.toString()))
     .map((lead) => {
       // Calculate hours ago
       const hoursAgo = Math.floor((new Date() - new Date(lead.createdAt)) / (1000 * 60 * 60));
@@ -503,11 +505,19 @@ const getAvailableLeadsForTutor = async (tutorId, filters = {}) => {
 const getUnlockedLeadsForTutor = async (tutorId, filters = {}) => {
   const page = Number(filters.page || 1);
   const limit = Number(filters.limit || 10);
-  const query = { 'lockedBy.tutor': tutorId };
-
-  if (filters.status) {
-    query['lockedBy.status'] = filters.status;
-  }
+  const lockMatch = { tutor: tutorId };
+  if (filters.status) lockMatch.status = filters.status;
+  const query = {
+    $and: [
+      { lockedBy: { $elemMatch: lockMatch } },
+      {
+        $or: [
+          { 'viewedBy.tutor': tutorId },
+          { lockedBy: { $elemMatch: { tutor: tutorId, adminAssigned: { $ne: true } } } },
+        ],
+      },
+    ],
+  };
 
   const [leads, total] = await Promise.all([
     Lead.find(query)
@@ -536,8 +546,10 @@ const unlockLeadForTutor = async (tutorId, leadId, io = null) => {
     if (!lead) {
       throw new Error('Lead not found');
     }
-    const alreadyUnlocked = (lead.lockedBy || []).some((lock) => lock.tutor?.toString() === tutorId.toString());
-    if (lead.status !== 'active' && !alreadyUnlocked) {
+    const existingLock = (lead.lockedBy || []).find((lock) => lock.tutor?.toString() === tutorId.toString());
+    const alreadyUnlocked = Boolean(existingLock);
+    const adminAssigned = isLeadAssignedToTutor(lead, tutorId);
+    if (lead.status !== 'active' && !adminAssigned && !alreadyUnlocked) {
       throw new Error(`Lead is ${lead.status}`);
     }
 
@@ -547,19 +559,23 @@ const unlockLeadForTutor = async (tutorId, leadId, io = null) => {
     }
 
     if (!alreadyUnlocked) {
-      subscription = await useEnquiry(tutorId, lead._id, session);
+      if (!adminAssigned) {
+        subscription = await useEnquiry(tutorId, lead._id, session);
+      }
       lead.lockedBy.push({
         tutor: tutorId,
         unlockedAt: new Date(),
         expiresAt: lead.expiresAt,
-        enquiriesCost: 1,
+        enquiriesCost: adminAssigned ? 0 : 1,
+        adminAssigned,
+        assignedAt: adminAssigned ? lead.adminAssigned?.assignedAt || new Date() : undefined,
         status: 'new',
       });
       lead.lockInfo = {
         tutor: tutorId,
         lockedAt: new Date(),
         expiresAt: lead.expiresAt,
-        creditsDeducted: 1,
+        creditsDeducted: adminAssigned ? 0 : 1,
         unlockCount: (lead.lockInfo?.unlockCount || 0) + 1,
       };
     }
@@ -602,7 +618,7 @@ const unlockLeadForTutor = async (tutorId, leadId, io = null) => {
     };
 
     return { 
-      lead: sanitizeLeadForTutor(lead.toObject(), tutorId, { revealContact: true }), 
+      lead: sanitizeLeadForTutor(lead.toObject(), tutorId, { revealContact: true }),
       enquiriesRemaining: subscription.remainingEnquiries, 
       student: studentContact,
       unlockedAt: new Date(),
