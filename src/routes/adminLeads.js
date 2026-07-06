@@ -24,6 +24,12 @@ const parsePagination = (query) => {
 router.get('/leads', async (req, res, next) => {
   try {
     const { page, limit, skip } = parsePagination(req.query);
+    const unassignedLeadQuery = {
+      $and: [
+        { $or: [{ lockedBy: { $size: 0 } }, { lockedBy: { $exists: false } }] },
+        { $or: [{ 'adminAssigned.isAssigned': { $ne: true } }, { 'adminAssigned.tutorIds': { $size: 0 } }] },
+      ],
+    };
     const filter = {};
     if (req.query.status && req.query.status !== 'all') filter.status = req.query.status;
     if (req.query.city && req.query.city !== 'all') filter['requirements.city'] = new RegExp(req.query.city, 'i');
@@ -42,7 +48,7 @@ router.get('/leads', async (req, res, next) => {
       Lead.countDocuments({ status: 'active' }),
       Lead.countDocuments({ status: 'locked' }),
       Lead.countDocuments({ status: 'converted' }),
-      Lead.countDocuments({ $or: [{ lockedBy: { $size: 0 } }, { lockedBy: { $exists: false } }] }),
+      Lead.countDocuments(unassignedLeadQuery),
     ]);
     res.json({
       success: true,
@@ -225,6 +231,11 @@ router.put('/leads/:id/convert', async (req, res, next) => {
         return res.status(404).json({ success: false, message: 'Tutor not found' });
       }
       
+      const wasConverted = lead.status === 'converted' ||
+        lead.lockedBy.some((lock) =>
+          lock.tutor?.toString() === tutorId.toString() && lock.status === 'converted'
+        );
+
       // Update lead status and conversion info
       lead.status = 'converted';
       lead.conversion = {
@@ -238,7 +249,9 @@ router.put('/leads/:id/convert', async (req, res, next) => {
       
       // Update tutor metrics
       if (!tutor.metrics) tutor.metrics = {};
-      tutor.metrics.convertedLeads = (tutor.metrics.convertedLeads || 0) + 1;
+      if (!wasConverted) {
+        tutor.metrics.convertedLeads = (tutor.metrics.convertedLeads || 0) + 1;
+      }
       
       // Recalculate conversion rate
       const totalLeads = tutor.metrics.convertedLeads + (tutor.metrics.lostLeads || 0);

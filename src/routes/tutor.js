@@ -10,6 +10,7 @@ const ContactMessage = require('../models/ContactMessage');
 const EnquiryTransaction = require('../models/EnquiryTransaction');
 const { createPlanOrder, getCurrentPlan, getPlanHistory, verifyPlanPayment } = require('../controllers/planController');
 const { getActiveSubscription } = require('../services/planService');
+const { normalizeSubjectObjects } = require('../utils/subjectUtils');
 const {
   addTutorLeadNote,
   buildTutorLeadQuery,
@@ -25,10 +26,7 @@ const sanitizeTutor = (tutor) => ({
   notifications: undefined,
 });
 
-const normalizeSubjects = (subjects = []) =>
-  (Array.isArray(subjects) ? subjects : [subjects])
-    .map((subject) => (typeof subject === 'string' ? { name: subject.trim() } : { ...subject, name: String(subject?.name || '').trim() }))
-    .filter((subject) => subject.name);
+const normalizeSubjects = (subjects = []) => normalizeSubjectObjects(subjects);
 
 // ─── Tutor Dashboard ──────────────────────────────────────────────────────────
 router.get('/dashboard', auth, authorize('tutor'), async (req, res, next) => {

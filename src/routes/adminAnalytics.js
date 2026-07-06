@@ -15,6 +15,12 @@ const analyticsHandler = async (req, res, next) => {
     const periodDays = { '7d': 7, '30d': 30, '3m': 90, '1y': 365 }[period] || 30;
     const startDate = new Date(now.getTime() - periodDays * 24 * 60 * 60 * 1000);
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const unassignedLeadQuery = {
+      $and: [
+        { $or: [{ lockedBy: { $size: 0 } }, { lockedBy: { $exists: false } }] },
+        { $or: [{ 'adminAssigned.isAssigned': { $ne: true } }, { 'adminAssigned.tutorIds': { $size: 0 } }] },
+      ],
+    };
 
     const [
       totalTutors,
@@ -43,7 +49,7 @@ const analyticsHandler = async (req, res, next) => {
       Lead.countDocuments({ status: 'active' }),
       Lead.countDocuments({ status: 'locked' }),
       Lead.countDocuments({ status: 'converted' }),
-      Lead.countDocuments({ $or: [{ lockedBy: { $size: 0 } }, { lockedBy: { $exists: false } }] }),
+      Lead.countDocuments(unassignedLeadQuery),
       Payment.find({ status: 'paid', createdAt: { $gte: startDate } }).lean(),
       Payment.find({ status: 'paid', createdAt: { $gte: thisMonthStart } }).lean(),
       Tutor.find({}).sort({ createdAt: -1 }).limit(5).lean(),
@@ -144,7 +150,18 @@ router.get('/conversions', async (req, res, next) => {
     const funnelData = [
       { name: 'Total Leads', value: await Lead.countDocuments({ createdAt: { $gte: startDate } }), percentage: 100 },
       { name: 'Active Leads', value: await Lead.countDocuments({ status: 'active', createdAt: { $gte: startDate } }), percentage: 85 },
-      { name: 'Assigned Leads', value: await Lead.countDocuments({ 'lockedBy.0': { $exists: true }, createdAt: { $gte: startDate } }), percentage: 65 },
+      {
+        name: 'Assigned Leads',
+        value: await Lead.countDocuments({
+          createdAt: { $gte: startDate },
+          $or: [
+            { 'lockedBy.0': { $exists: true } },
+            { 'adminAssigned.isAssigned': true },
+            { 'adminAssigned.tutorIds.0': { $exists: true } },
+          ],
+        }),
+        percentage: 65,
+      },
       { name: 'Contacted Leads', value: await Lead.countDocuments({ 'lockedBy.status': 'contacted', createdAt: { $gte: startDate } }), percentage: 45 },
       { name: 'Converted Leads', value: await Lead.countDocuments({ status: 'converted', createdAt: { $gte: startDate } }), percentage: 25 },
     ];

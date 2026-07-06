@@ -10,6 +10,7 @@ const { logActivity } = require('../middleware/activityLog');
 const { activatePlan, addEnquiries, extendExpiry } = require('../services/planService');
 const { sendToTutor } = require('../services/notificationService');
 const { assignLeadToTutors } = require('../services/leadService');
+const { normalizeSubjectObjects } = require('../utils/subjectUtils');
 
 const router = express.Router();
 
@@ -51,10 +52,7 @@ const toCsv = (rows) => {
   return [headers.join(','), ...lines.map((line) => line.map((value) => `"${String(value || '').replace(/"/g, '""')}"`).join(','))].join('\n');
 };
 
-const normalizeSubjects = (subjects = []) =>
-  (Array.isArray(subjects) ? subjects : [subjects])
-    .map((subject) => (typeof subject === 'string' ? { name: subject.trim() } : { ...subject, name: String(subject?.name || '').trim() }))
-    .filter((subject) => subject.name);
+const normalizeSubjects = (subjects = []) => normalizeSubjectObjects(subjects);
 
 const normalizeTeachingModes = (modes = ['both']) => {
   const normalized = (Array.isArray(modes) ? modes : [modes]).map((mode) => String(mode || '').toLowerCase());
@@ -91,7 +89,12 @@ router.get('/tutors/:id', async (req, res, next) => {
     const [tutor, paymentHistory, leads, subscription, reviews] = await Promise.all([
       Tutor.findById(req.params.id).lean(),
       Payment.find({ user: req.params.id }).sort({ createdAt: -1 }).lean(),
-      Lead.find({ 'lockedBy.tutor': req.params.id }).sort({ createdAt: -1 }).lean(),
+      Lead.find({
+        $or: [
+          { 'lockedBy.tutor': req.params.id },
+          { 'adminAssigned.tutorIds': req.params.id },
+        ],
+      }).sort({ createdAt: -1 }).lean(),
       TutorPlanSubscription.find({ tutor: req.params.id }).sort({ createdAt: -1 }).lean(),
       Review.find({ tutor: req.params.id }).sort({ createdAt: -1 }).lean(),
     ]);

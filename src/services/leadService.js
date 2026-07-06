@@ -6,6 +6,7 @@ const Student = require('../models/Student');
 const Tutor = require('../models/Tutor');
 const { sendToTutor } = require('./notificationService');
 const { getActiveSubscription, useEnquiry } = require('./planService');
+const { normalizeSubjects, getSubjectNames } = require('../utils/subjectUtils');
 
 const getSettings = async () => {
   let settings = await SiteSettings.findById('main');
@@ -17,24 +18,10 @@ const getSettings = async () => {
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const normalizeSubjects = (subjects, fallback = 'General Tutoring') => {
-  const rawSubjects = Array.isArray(subjects) ? subjects : [subjects].filter(Boolean);
-  const normalized = rawSubjects
-    .map((subject) => (typeof subject === 'string' ? subject : subject?.name))
-    .map((subject) => String(subject || '').trim())
-    .filter(Boolean);
-
-  return Array.from(new Set(normalized.length ? normalized : [fallback]));
-};
-
 const hasAllSubjects = (subjects = []) =>
   subjects.some((subject) => String(subject || '').trim().toLowerCase() === 'all subjects');
 
-const getTutorSubjectNames = (tutor) =>
-  (tutor.subjects || [])
-    .map((subject) => (typeof subject === 'string' ? subject : subject?.name))
-    .map((subject) => String(subject || '').trim())
-    .filter(Boolean);
+const getTutorSubjectNames = (tutor) => getSubjectNames(tutor.subjects || []);
 
 const getTutorTeachingModes = (tutor) => {
   const modes = Array.isArray(tutor.teachingModes) ? tutor.teachingModes : [];
@@ -325,6 +312,28 @@ const createLeadFromRegisteredStudent = async (student, payload = {}, io = null)
     io
   );
 
+const incrementTutorLeadMetrics = async (tutorId, delta = {}, session = null) => {
+  const tutor = await Tutor.findById(tutorId).session(session);
+  if (!tutor) return null;
+
+  tutor.metrics = tutor.metrics || {};
+  const updates = Object.entries(delta).reduce((acc, [key, value]) => {
+    if (value) acc[`metrics.${key}`] = value;
+    return acc;
+  }, {});
+
+  if (Object.keys(updates).length) {
+    await Tutor.updateOne({ _id: tutorId }, { $inc: updates }, session ? { session } : undefined);
+    const nextMetrics = Object.entries(delta).reduce((acc, [key, value]) => {
+      if (value) acc[key] = (acc[key] || 0) + value;
+      return acc;
+    }, { ...tutor.metrics });
+    return { ...tutor.toObject(), metrics: nextMetrics };
+  }
+
+  return tutor;
+};
+
 const assignLeadToTutors = async (leadId, tutorIds = [], options = {}) => {
   const {
     adminId = null,
@@ -361,9 +370,7 @@ const assignLeadToTutors = async (leadId, tutorIds = [], options = {}) => {
       continue;
     }
 
-    tutor.metrics = tutor.metrics || {};
-    tutor.metrics.totalLeads = (tutor.metrics.totalLeads || 0) + 1;
-    await tutor.save({ validateBeforeSave: false });
+    await incrementTutorLeadMetrics(tutor._id, { totalLeads: 1 }, null);
 
     distributed.push({
       tutorId: tutor._id,
@@ -583,15 +590,14 @@ const unlockLeadForTutor = async (tutorId, leadId, io = null) => {
     const alreadyViewed = (lead.viewedBy || []).some((view) => view.tutor?.toString() === tutorId.toString());
     if (!alreadyViewed) {
       lead.viewedBy.push({ tutor: tutorId, viewedAt: new Date() });
-      await Tutor.updateOne(
-        { _id: tutorId },
+      await incrementTutorLeadMetrics(
+        tutorId,
         {
-          $inc: {
-            'metrics.enquiriesViewed': 1,
-            ...(!alreadyUnlocked ? { 'metrics.unlockedLeads': 1, 'metrics.totalLeads': 1 } : {}),
-          },
+          enquiriesViewed: 1,
+          ...(!alreadyUnlocked ? { unlockedLeads: 1 } : {}),
+          ...(!alreadyUnlocked && !adminAssigned ? { totalLeads: 1 } : {}),
         },
-        { session }
+        session
       );
     }
 
@@ -641,10 +647,14 @@ const updateTutorLeadStatus = async (tutorId, leadId, status) => {
     throw new Error('Lead not unlocked by tutor');
   }
 
+  const wasConverted = lock.status === 'converted' || lead.status === 'converted';
   lock.status = status;
-  if (status === 'converted') {
+  if (status === 'converted' && !wasConverted) {
     lead.status = 'converted';
     lead.conversion = { convertedAt: new Date(), convertedBy: tutorId };
+    await incrementTutorLeadMetrics(tutorId, { convertedLeads: 1 });
+  } else if (status === 'converted') {
+    lead.status = 'converted';
   }
 
   await lead.save();
