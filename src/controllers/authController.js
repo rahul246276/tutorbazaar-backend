@@ -6,6 +6,7 @@ const { generateToken, generateRefreshToken } = require('../utils/jwt');
 const { sendEmail, emailTemplates } = require('../utils/email');
 const logger = require('../utils/logger');
 const { createLeadFromRegisteredStudent } = require('../services/leadService');
+const { normalizeSubjectObjects } = require('../utils/subjectUtils');
 
 const authController = {
   // Validation rules
@@ -49,6 +50,16 @@ const authController = {
       let user;
 
       if (role === 'tutor') {
+        const city = String(additionalData.city || '').trim();
+        const subjects = normalizeSubjectObjects(additionalData.subjects || []);
+
+        if (!city || subjects.length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: 'City and at least one subject are required for tutor registration',
+          });
+        }
+
         user = new Tutor({
           email,
           password,
@@ -56,8 +67,8 @@ const authController = {
           firstName,
           lastName,
           phone,
-          city: additionalData.city,
-          subjects: additionalData.subjects || [],
+          city,
+          subjects,
           teachingModes: additionalData.teachingModes || ['both'],
           bio: additionalData.bio,
           education: additionalData.education || [],

@@ -5,6 +5,8 @@ const Lead = require('../models/Lead');
 const Payment = require('../models/Payment');
 const Review = require('../models/Review');
 const TutorPlanSubscription = require('../models/TutorPlanSubscription');
+const EnquiryTransaction = require('../models/EnquiryTransaction');
+const Notification = require('../models/Notification');
 const User = require('../models/User');
 const { logActivity } = require('../middleware/activityLog');
 const { activatePlan, addEnquiries, extendExpiry } = require('../services/planService');
@@ -299,9 +301,35 @@ router.post('/tutors/:id/extend-plan', async (req, res, next) => {
 
 router.delete('/tutors/:id', async (req, res, next) => {
   try {
-    await Tutor.findByIdAndDelete(req.params.id);
-    await Lead.updateMany({}, { $pull: { lockedBy: { tutor: req.params.id } } });
-    res.json({ success: true, message: 'Tutor deleted' });
+    const tutor = await Tutor.findById(req.params.id).select('firstName lastName');
+    if (!tutor) return res.status(404).json({ success: false, message: 'Tutor not found' });
+
+    const tutorId = tutor._id;
+    await Promise.all([
+      Lead.updateMany({}, {
+        $pull: {
+          lockedBy: { tutor: tutorId },
+          viewedBy: { tutor: tutorId },
+          matchedTutors: { tutor: tutorId },
+          'adminAssigned.tutorIds': tutorId,
+        },
+      }),
+      Lead.updateMany({ 'lockInfo.tutor': tutorId }, { $unset: { lockInfo: '' } }),
+      Lead.updateMany({ 'conversion.convertedBy': tutorId }, { $set: { 'conversion.convertedBy': null } }),
+      TutorPlanSubscription.deleteMany({ tutor: tutorId }),
+      EnquiryTransaction.deleteMany({ tutor: tutorId }),
+      Payment.deleteMany({ user: tutorId, userType: 'tutor' }),
+      Review.deleteMany({ tutor: tutorId }),
+      Notification.deleteMany({ recipient: tutorId, recipientRole: 'tutor' }),
+    ]);
+    await Lead.updateMany(
+      { 'adminAssigned.tutorIds': { $size: 0 } },
+      { $set: { 'adminAssigned.isAssigned': false } }
+    );
+    await Tutor.findByIdAndDelete(tutorId);
+    await logActivity(req, 'delete_tutor', 'tutor', tutorId, `${tutor.firstName} ${tutor.lastName}`);
+
+    res.json({ success: true, message: 'Tutor profile and related data deleted' });
   } catch (error) {
     next(error);
   }

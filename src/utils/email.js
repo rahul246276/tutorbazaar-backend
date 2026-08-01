@@ -3,7 +3,6 @@ const logger = require('./logger');
 
 let transporter = null;
 
-// Only create transporter if SMTP is configured
 const getTransporter = () => {
   if (transporter) return transporter;
 
@@ -25,9 +24,41 @@ const getTransporter = () => {
 };
 
 const sendEmail = async (options) => {
+  const resendApiKey = process.env.RESEND_API_KEY;
+  if (resendApiKey) {
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev',
+          to: [options.to],
+          subject: options.subject,
+          html: options.html,
+          text: options.text || options.html.replace(/<[^>]+>/g, ' '),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        throw new Error(`Resend rejected email: ${errorData}`);
+      }
+
+      const data = await response.json();
+      logger.info(`Email sent via Resend: ${data.id}`);
+      return data;
+    } catch (error) {
+      logger.error('Resend email sending failed:', error);
+      throw error;
+    }
+  }
+
   const t = getTransporter();
   if (!t) {
-    logger.warn('Email not sent - SMTP not configured. To:', options.to, 'Subject:', options.subject);
+    logger.warn('Email not sent - SMTP/Resend not configured. To:', options.to, 'Subject:', options.subject);
     return null;
   }
 

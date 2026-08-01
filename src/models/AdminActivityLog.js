@@ -15,6 +15,7 @@ const adminActivityLogSchema = new mongoose.Schema({
       'approve_tutor',
       'suspend_tutor',
       'reactivate_tutor',
+      'delete_tutor',
       'edit_tutor',
       'featured_tutor',
       'assign_lead',

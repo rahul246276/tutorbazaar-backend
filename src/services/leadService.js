@@ -48,7 +48,11 @@ const buildTutorLeadQuery = (tutor, filters = {}) => {
       subjectOptions.push({ 'requirements.subjects': /^All Subjects$/i });
     }
   } else if (!hasAllSubjects(tutorSubjects) && tutorSubjects.length > 0) {
-    subjectOptions.push({ 'requirements.subjects': { $in: tutorSubjects } });
+    subjectOptions.push({
+      'requirements.subjects': {
+        $in: tutorSubjects.map((subject) => new RegExp(`^${escapeRegex(subject)}$`, 'i')),
+      },
+    });
     subjectOptions.push({ 'requirements.subjects': /^All Subjects$/i });
   }
   if (subjectOptions.length) and.push({ $or: subjectOptions });
@@ -183,6 +187,7 @@ const notifyMatchingTutors = async (lead) => {
 const createLeadFromEnquiry = async (payload, io = null) => {
   const settings = await getSettings();
   const subjects = normalizeSubjects(payload.subjects || payload.subject || payload.courseInterest);
+  const city = String(payload.city || '').trim() || 'Unknown';
   const budget = normalizeBudget(payload.budget);
   const coordinates = normalizeCoordinates(payload.coordinates || payload.location?.coordinates);
   const email = String(payload.email || '').trim().toLowerCase();
@@ -200,7 +205,7 @@ const createLeadFromEnquiry = async (payload, io = null) => {
       firstName: payload.firstName,
       lastName: payload.lastName,
       phone: payload.phone,
-      city: payload.city || 'Unknown',
+      city,
       locality: payload.locality || '',
       area: payload.area || payload.locality || '',
       state: payload.state || '',
@@ -218,7 +223,7 @@ const createLeadFromEnquiry = async (payload, io = null) => {
   } else {
     const studentUpdates = {
       phone: payload.phone || student.phone,
-      city: payload.city || student.city || 'Unknown',
+      city: city === 'Unknown' ? student.city || city : city,
       locality: payload.locality ?? student.locality,
       area: payload.area || payload.locality || student.area,
       state: payload.state ?? student.state,
@@ -254,7 +259,7 @@ const createLeadFromEnquiry = async (payload, io = null) => {
       subjects,
       board: payload.board || student.board || 'Other',
       mode: payload.mode || student.preferences?.mode || 'both',
-      city: payload.city || student.city || 'Unknown',
+      city: city === 'Unknown' ? student.city || city : city,
       locality: payload.locality || '',
       area: payload.area || payload.locality || '',
       state: payload.state || student.state || '',

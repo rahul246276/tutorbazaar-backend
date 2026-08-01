@@ -5,16 +5,19 @@ const ContactMessage = require('../models/ContactMessage');
 const { sendEmail } = require('../utils/email');
 const { createLeadFromEnquiry } = require('../services/leadService');
 const logger = require('../utils/logger');
+const { normalizeSubjects } = require('../utils/subjectUtils');
 
 const router = express.Router();
 
 router.post('/enquiry', async (req, res, next) => {
   try {
-    const subjects = Array.isArray(req.body.subjects)
-      ? req.body.subjects.filter(Boolean)
-      : [req.body.subject].filter(Boolean);
+    const submittedSubjects = req.body.subject === 'custom'
+      ? req.body.customSubject
+      : (req.body.subjects || req.body.subject);
+    const subjects = normalizeSubjects(submittedSubjects, '').filter(Boolean);
+    const city = String(req.body.city || '').trim();
 
-    if (!req.body.firstName || !req.body.lastName || !req.body.email || !req.body.phone || !req.body.city || !req.body.class || subjects.length === 0) {
+    if (!req.body.firstName || !req.body.lastName || !req.body.email || !req.body.phone || !city || !req.body.class || subjects.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'First name, last name, email, phone, city, class and subject are required',
@@ -26,7 +29,7 @@ router.post('/enquiry', async (req, res, next) => {
       lastName: req.body.lastName,
       email: req.body.email,
       phone: req.body.phone,
-      city: req.body.city,
+      city,
       locality: req.body.locality || '',
       area: req.body.area || req.body.locality || '',
       state: req.body.state || '',
