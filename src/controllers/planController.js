@@ -5,6 +5,7 @@ const PromoCode = require('../models/PromoCode');
 const SubscriptionPlan = require('../models/SubscriptionPlan');
 const Tutor = require('../models/Tutor');
 const TutorPlanSubscription = require('../models/TutorPlanSubscription');
+const OnlinePayment = require('../models/OnlinePayment');
 const razorpay = require('../config/razorpay');
 const logger = require('../utils/logger');
 const { activatePlan, getActiveSubscription } = require('../services/planService');
@@ -345,6 +346,24 @@ const handlePaymentWebhook = async (req, res) => {
           $set: {
             razorpayPaymentId: paymentEntity.id,
             status: payload.event === 'payment.failed' ? 'failed' : 'paid',
+          },
+          $push: {
+            webhookEvents: {
+              event: payload.event,
+              receivedAt: new Date(),
+              payload: paymentEntity,
+            },
+          },
+        }
+      );
+
+      await OnlinePayment.updateOne(
+        { razorpayOrderId: paymentEntity.order_id },
+        {
+          $set: {
+            razorpayPaymentId: paymentEntity.id,
+            status: payload.event === 'payment.failed' ? 'failed' : 'paid',
+            ...(payload.event === 'payment.failed' ? {} : { paidAt: new Date() }),
           },
           $push: {
             webhookEvents: {
