@@ -9,9 +9,9 @@ const EnquiryTransaction = require('../models/EnquiryTransaction');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const { logActivity } = require('../middleware/activityLog');
-const { activatePlan, addEnquiries, extendExpiry } = require('../services/planService');
+const { activatePlan, addEnquiries, extendExpiry, getActiveSubscription } = require('../services/planService');
 const { sendToTutor } = require('../services/notificationService');
-const { assignLeadToTutors } = require('../services/leadService');
+const { assignLeadToTutors, buildTutorLeadQuery } = require('../services/leadService');
 const { normalizeSubjectObjects } = require('../utils/subjectUtils');
 
 const router = express.Router();
@@ -88,20 +88,88 @@ router.get('/tutors', async (req, res, next) => {
 
 router.get('/tutors/:id', async (req, res, next) => {
   try {
-    const [tutor, paymentHistory, leads, subscription, reviews] = await Promise.all([
-      Tutor.findById(req.params.id).lean(),
+    const tutor = await Tutor.findById(req.params.id).lean();
+    if (!tutor) return res.status(404).json({ success: false, message: 'Tutor not found' });
+
+    const tutorId = tutor._id;
+    const activePlan = await getActiveSubscription(tutorId);
+    const isPremiumPlan = activePlan && ['platinum', 'diamond'].includes(activePlan.plan);
+    const marketplaceLeadQuery = buildTutorLeadQuery(tutor);
+    if (!isPremiumPlan) {
+      marketplaceLeadQuery.$and = [
+        ...(marketplaceLeadQuery.$and || []),
+        {
+          $or: [
+            { advanceReleaseAt: { $exists: false } },
+            { advanceReleaseAt: { $lte: new Date() } },
+          ],
+        },
+      ];
+    }
+    const availableLeadQuery = activePlan ? {
+      $or: [
+        {
+          $and: [
+            marketplaceLeadQuery,
+            { 'lockedBy.tutor': { $ne: tutorId } },
+            { 'viewedBy.tutor': { $ne: tutorId } },
+          ],
+        },
+        {
+          status: { $in: ['active', 'locked'] },
+          'viewedBy.tutor': { $ne: tutorId },
+          $or: [
+            { 'adminAssigned.tutorIds': tutorId },
+            { lockedBy: { $elemMatch: { tutor: tutorId, adminAssigned: true } } },
+          ],
+        },
+      ],
+    } : { _id: null };
+    const viewedLeadQuery = {
+      $or: [
+        { 'viewedBy.tutor': tutorId },
+        { lockedBy: { $elemMatch: { tutor: tutorId, adminAssigned: { $ne: true } } } },
+      ],
+    };
+    const [paymentHistory, leads, availableLeads, viewedLeads, subscription, reviews] = await Promise.all([
       Payment.find({ user: req.params.id }).sort({ createdAt: -1 }).lean(),
       Lead.find({
         $or: [
-          { 'lockedBy.tutor': req.params.id },
-          { 'adminAssigned.tutorIds': req.params.id },
+          { 'lockedBy.tutor': tutorId },
+          { 'adminAssigned.tutorIds': tutorId },
         ],
       }).sort({ createdAt: -1 }).lean(),
+      Lead.find(availableLeadQuery).sort({ createdAt: -1 }).lean(),
+      Lead.find(viewedLeadQuery).sort({ createdAt: -1 }).lean(),
       TutorPlanSubscription.find({ tutor: req.params.id }).sort({ createdAt: -1 }).lean(),
       Review.find({ tutor: req.params.id }).sort({ createdAt: -1 }).lean(),
     ]);
-    if (!tutor) return res.status(404).json({ success: false, message: 'Tutor not found' });
-    res.json({ success: true, data: { tutor, paymentHistory, leads, subscription, reviews } });
+    const withTutorActivity = (lead) => {
+      const tutorLock = (lead.lockedBy || []).find((lock) => lock.tutor?.toString() === tutorId.toString());
+      const tutorView = (lead.viewedBy || []).find((view) => view.tutor?.toString() === tutorId.toString());
+      return {
+        ...lead,
+        tutorActivity: {
+          viewedAt: tutorView?.viewedAt || tutorLock?.unlockedAt || null,
+          unlockedAt: tutorLock?.unlockedAt || null,
+          status: tutorLock?.status || null,
+          notes: tutorLock?.notes || '',
+          adminAssigned: Boolean(tutorLock?.adminAssigned),
+        },
+      };
+    };
+    res.json({
+      success: true,
+      data: {
+        tutor,
+        paymentHistory,
+        leads,
+        availableLeads: availableLeads.map(withTutorActivity),
+        viewedLeads: viewedLeads.map(withTutorActivity),
+        subscription,
+        reviews,
+      },
+    });
   } catch (error) {
     next(error);
   }
